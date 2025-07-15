@@ -1,0 +1,168 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: market_risk
+      POSTGRES_USER: risk_user
+      POSTGRES_PASSWORD: risk_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    networks:
+      - risk_network
+
+  # TimescaleDB for time series data
+  timescaledb:
+    image: timescale/timescaledb:latest-pg15
+    environment:
+      POSTGRES_DB: timeseries_risk
+      POSTGRES_USER: ts_user
+      POSTGRES_PASSWORD: ts_password
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    networks:
+      - risk_network
+
+  # Redis for caching and message queue
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - risk_network
+
+  # RabbitMQ for message queuing
+  rabbitmq:
+    image: rabbitmq:3-management
+    environment:
+      RABBITMQ_DEFAULT_USER: risk_queue
+      RABBITMQ_DEFAULT_PASS: queue_password
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"  # Management UI
+    networks:
+      - risk_network
+
+  # API Gateway Service
+  api-gateway:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      - DATABASE_URL=postgresql://risk_user:risk_password@postgres:5432/market_risk
+      - TIMESCALE_URL=postgresql://ts_user:ts_password@timescaledb:5432/timeseries_risk
+      - REDIS_URL=redis://redis:6379
+      - RABBITMQ_URL=amqp://risk_queue:queue_password@rabbitmq:5672
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - redis
+      - rabbitmq
+    networks:
+      - risk_network
+    volumes:
+      - ./backend:/app
+
+  # Risk Calculation Service
+  risk-engine:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.risk-engine
+    environment:
+      - DATABASE_URL=postgresql://risk_user:risk_password@postgres:5432/market_risk
+      - TIMESCALE_URL=postgresql://ts_user:ts_password@timescaledb:5432/timeseries_risk
+      - REDIS_URL=redis://redis:6379
+      - RABBITMQ_URL=amqp://risk_queue:queue_password@rabbitmq:5672
+    depends_on:
+      - postgres
+      - timescaledb
+      - redis
+      - rabbitmq
+    networks:
+      - risk_network
+    deploy:
+      replicas: 2
+
+  # Data Ingestion Service
+  data-ingestion:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.data-ingestion
+    environment:
+      - DATABASE_URL=postgresql://risk_user:risk_password@postgres:5432/market_risk
+      - TIMESCALE_URL=postgresql://ts_user:ts_password@timescaledb:5432/timeseries_risk
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - postgres
+      - timescaledb
+      - redis
+    networks:
+      - risk_network
+
+  # Frontend Application
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000
+    depends_on:
+      - api-gateway
+    networks:
+      - risk_network
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+
+  # Monitoring with Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - risk_network
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana:/etc/grafana/provisioning
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - risk_network
+
+volumes:
+  postgres_data:
+  timescale_data:
+  redis_data:
+  rabbitmq_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  risk_network:
+    driver: bridge
